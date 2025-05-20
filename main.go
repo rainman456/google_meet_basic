@@ -93,7 +93,7 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 
-	// ✅ Create room if it doesn't exist yet
+	//  Create room if it doesn't exist yet
 	if _, exists := rooms[msg.CallID]; !exists {
 		rooms[msg.CallID] = &Room{
 			clients: make(map[*websocket.Conn]bool),
@@ -111,7 +111,7 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 
 	log.Printf("Stored offer for call %s", msg.CallID)
 
-	// ✅ Send offer to all other clients (usually just the callee)
+	//  Send offer to all other clients (usually just the callee)
 	for conn := range room.clients {
 		if conn != sender {
 			err := conn.WriteJSON(msg)
@@ -187,7 +187,7 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 
-	// ✅ Create room if it doesn't exist
+	//  Create room if it doesn't exist
 	if _, exists := rooms[msg.CallID]; !exists {
 		rooms[msg.CallID] = &Room{
 			clients: make(map[*websocket.Conn]bool),
@@ -204,7 +204,7 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 
 	log.Printf("Client joined call %s", msg.CallID)
 
-	// ✅ Send stored offer if it exists
+	//  Send stored offer if it exists
 	if room.offer != nil {
 		err := sender.WriteJSON(*room.offer)
 		if err != nil {
