@@ -38,21 +38,32 @@ var (
 	roomsMu     sync.Mutex
 )
 
+func sendError(conn *websocket.Conn, callID, message string) {
+	err := conn.WriteJSON(Message{
+		Type:   "error",
+		CallID: callID,
+		Data:   message,
+	})
+	if err != nil {
+		log.Printf("Error sending error message to client %s: %v", conn.RemoteAddr(), err)
+	}
+}
+
 func handleConnections(w http.ResponseWriter, r *http.Request) {
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("error upgrading connection: %v", err)
+		log.Printf("Error upgrading connection from %s: %v", r.RemoteAddr, err)
 		return
 	}
 
 	// Add new client
 	clientsMu.Lock()
-	clients[ws] = &Client{conn: ws}
+	clients[ws] = &Client{conn: ws, callID: ""}
 	idleClients[ws] = true
 	clientsMu.Unlock()
+	log.Printf("New client connected: %s", ws.RemoteAddr())
 
 	defer func() {
-		// Clean up on disconnect
 		clientsMu.Lock()
 		client := clients[ws]
 		if client != nil && client.callID != "" {
@@ -62,15 +73,28 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		delete(idleClients, ws)
 		clientsMu.Unlock()
 		ws.Close()
+		log.Printf("Client disconnected: %s", ws.RemoteAddr())
 	}()
 
 	for {
 		var msg Message
 		err := ws.ReadJSON(&msg)
 		if err != nil {
-			log.Printf("error reading message: %v", err)
+			if websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
+				log.Printf("Client %s closed connection", ws.RemoteAddr())
+			} else {
+				log.Printf("Error reading message from %s: %v", ws.RemoteAddr(), err)
+			}
 			break
 		}
+
+		// Validate callID for messages that require it
+		if msg.Type != "join_call" && msg.CallID == "" {
+			sendError(ws, "", "Missing callId in message")
+			continue
+		}
+
+		log.Printf("Received message from %s: type=%s, callId=%s", ws.RemoteAddr(), msg.Type, msg.CallID)
 
 		switch msg.Type {
 		case "offer":
@@ -80,11 +104,20 @@ func handleConnections(w http.ResponseWriter, r *http.Request) {
 		case "ice-candidate":
 			handleICECandidate(ws, msg)
 		case "join_call":
+			if msg.CallID == "" {
+				sendError(ws, "", "Missing callId for join_call")
+				continue
+			}
 			handleJoinCall(ws, msg)
 		case "hangup":
+			if msg.CallID == "" {
+				sendError(ws, "", "Missing callId for hangup")
+				continue
+			}
 			handleHangup(ws, msg.CallID)
 		default:
-			log.Printf("unknown message type: %s", msg.Type)
+			log.Printf("Unknown message type from %s: %s", ws.RemoteAddr(), msg.Type)
+			sendError(ws, msg.CallID, fmt.Sprintf("Unknown message type: %s", msg.Type))
 		}
 	}
 }
@@ -93,180 +126,232 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	defer roomsMu.Unlock()
 
-	//  Create room if it doesn't exist yet
+	// Create room if it doesn't exist
 	if _, exists := rooms[msg.CallID]; !exists {
 		rooms[msg.CallID] = &Room{
 			clients: make(map[*websocket.Conn]bool),
+			offer:   &msg,
 		}
-		log.Printf("Created new room for call %s (via offer)", msg.CallID)
+		log.Printf("Created room for call %s", msg.CallID)
+	} else {
+		rooms[msg.CallID].offer = &msg
 	}
 
 	room := rooms[msg.CallID]
-	room.offer = &msg
-	room.clients[sender] = true
 
+	// Limit room to 2 clients
+	if len(room.clients) >= 2 {
+		sendError(sender, msg.CallID, "Room is full")
+		return
+	}
+
+	// Add sender to room
+	room.clients[sender] = true
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
+	delete(idleClients, sender)
 	clientsMu.Unlock()
 
-	log.Printf("Stored offer for call %s", msg.CallID)
+	log.Printf("Stored offer for call %s from %s", msg.CallID, sender.RemoteAddr())
 
-	//  Send offer to all other clients (usually just the callee)
-	for conn := range room.clients {
-		if conn != sender {
-			err := conn.WriteJSON(msg)
-			if err != nil {
-				log.Printf("error forwarding offer: %v", err)
+	// Send offer to other clients in the room
+	for client := range room.clients {
+		if client != sender {
+			if err := client.WriteJSON(msg); err != nil {
+				log.Printf("Error sending offer to %s: %v", client.RemoteAddr(), err)
+				removeClient(client, msg.CallID)
 			} else {
-				log.Printf("Forwarded offer to callee in call %s", msg.CallID)
+				log.Printf("Sent offer to %s for call %s", client.RemoteAddr(), msg.CallID)
 			}
 		}
 	}
 }
 
-
 func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
-	defer roomsMu.Unlock()
-
 	room, exists := rooms[msg.CallID]
 	if !exists {
-		log.Printf("no room found for call %s", msg.CallID)
+		sendError(sender, msg.CallID, "Room not found")
+		roomsMu.Unlock()
 		return
 	}
 
-	// Add sender to room and set their callID
+	// Limit room to 2 clients
+	if len(room.clients) >= 2 && !room.clients[sender] {
+		sendError(sender, msg.CallID, "Room is full")
+		roomsMu.Unlock()
+		return
+	}
+
 	room.clients[sender] = true
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
+	delete(idleClients, sender)
 	clientsMu.Unlock()
 
-	// Send answer to all other clients in the room
+	// Send answer to other clients in the room
 	for client := range room.clients {
 		if client != sender {
-			err := client.WriteJSON(msg)
-			if err != nil {
-				log.Printf("error sending answer: %v", err)
-				clientsMu.Lock()
-				delete(clients, client)
-				delete(idleClients, client)
-				clientsMu.Unlock()
-				client.Close()
+			if err := client.WriteJSON(msg); err != nil {
+				log.Printf("Error sending answer to %s: %v", client.RemoteAddr(), err)
+				removeClient(client, msg.CallID)
+			} else {
+				log.Printf("Sent answer to %s for call %s", client.RemoteAddr(), msg.CallID)
 			}
 		}
 	}
+	roomsMu.Unlock()
 }
 
 func handleICECandidate(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
-	defer roomsMu.Unlock()
-
 	room, exists := rooms[msg.CallID]
 	if !exists {
-		log.Printf("no room found for call %s", msg.CallID)
+		sendError(sender, msg.CallID, "Room not found")
+		roomsMu.Unlock()
 		return
 	}
 
-	// Send ICE candidate to all other clients in the room
+	// Send ICE candidate to other clients in the room
 	for client := range room.clients {
 		if client != sender {
-			err := client.WriteJSON(msg)
-			if err != nil {
-				log.Printf("error sending ICE candidate: %v", err)
-				clientsMu.Lock()
-				delete(clients, client)
-				delete(idleClients, client)
-				clientsMu.Unlock()
-				client.Close()
+			if err := client.WriteJSON(msg); err != nil {
+				log.Printf("Error sending ICE candidate to %s: %v", client.RemoteAddr(), err)
+				removeClient(client, msg.CallID)
+			} else {
+				log.Printf("Sent ICE candidate to %s for call %s", client.RemoteAddr(), msg.CallID)
 			}
 		}
 	}
+	roomsMu.Unlock()
 }
 
 func handleJoinCall(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
-	defer roomsMu.Unlock()
-
-	//  Create room if it doesn't exist
 	if _, exists := rooms[msg.CallID]; !exists {
 		rooms[msg.CallID] = &Room{
 			clients: make(map[*websocket.Conn]bool),
+			offer:   nil,
 		}
-		log.Printf("Created new room for call %s (via join_call)", msg.CallID)
+		log.Printf("Created room for call %s", msg.CallID)
 	}
 
 	room := rooms[msg.CallID]
-	room.clients[sender] = true
 
+	// Limit room to 2 clients
+	if len(room.clients) >= 2 {
+		sendError(sender, msg.CallID, "Room is full")
+		roomsMu.Unlock()
+		return
+	}
+
+	room.clients[sender] = true
 	clientsMu.Lock()
 	clients[sender].callID = msg.CallID
+	delete(idleClients, sender)
 	clientsMu.Unlock()
 
-	log.Printf("Client joined call %s", msg.CallID)
+	log.Printf("Client %s joined call %s", sender.RemoteAddr(), msg.CallID)
 
-	//  Send stored offer if it exists
 	if room.offer != nil {
-		err := sender.WriteJSON(*room.offer)
-		if err != nil {
-			log.Printf("error sending stored offer to callee: %v", err)
+		if err := sender.WriteJSON(*room.offer); err != nil {
+			log.Printf("Error sending stored offer to %s: %v", sender.RemoteAddr(), err)
+			removeClient(sender, msg.CallID)
 		} else {
-			log.Printf("Sent stored offer to callee in call %s", msg.CallID)
+			log.Printf("Sent stored offer to %s for call %s", sender.RemoteAddr(), msg.CallID)
 		}
 	} else {
-		// Optional: send "waiting for offer" message
-		sender.WriteJSON(Message{
+		if err := sender.WriteJSON(Message{
 			Type:   "call_joined",
 			CallID: msg.CallID,
-		})
+		}); err != nil {
+			log.Printf("Error sending call_joined to %s: %v", sender.RemoteAddr(), err)
+			removeClient(sender, msg.CallID)
+		}
 	}
+	roomsMu.Unlock()
 }
-
-
 
 func handleHangup(sender *websocket.Conn, callID string) {
 	roomsMu.Lock()
-	defer roomsMu.Unlock()
-
 	room, exists := rooms[callID]
 	if !exists {
+		roomsMu.Unlock()
 		return
 	}
 
 	// Notify other clients in the room
 	for client := range room.clients {
 		if client != sender {
-			err := client.WriteJSON(Message{
+			if err := client.WriteJSON(Message{
 				Type:   "peer_disconnected",
 				CallID: callID,
-			})
-			if err != nil {
-				log.Printf("error sending hangup notification: %v", err)
+			}); err != nil {
+				log.Printf("Error sending hangup notification to %s: %v", client.RemoteAddr(), err)
+				removeClient(client, callID)
+			} else {
+				log.Printf("Sent hangup notification to %s for call %s", client.RemoteAddr(), callID)
 			}
 		}
 	}
 
-	// Clean up client state
+	// Reset client states
 	clientsMu.Lock()
 	for client := range room.clients {
 		if c, ok := clients[client]; ok {
-			c.callID = ""               // Reset call ID
-			idleClients[client] = true // Make them available for another call
+			c.callID = ""
+			idleClients[client] = true
 		}
 	}
 	clientsMu.Unlock()
 
 	// Delete the room
 	delete(rooms, callID)
+	log.Printf("Deleted room for call %s", callID)
+	roomsMu.Unlock()
+}
+
+func removeClient(client *websocket.Conn, callID string) {
+	roomsMu.Lock()
+	if room, exists := rooms[callID]; exists {
+		delete(room.clients, client)
+		if len(room.clients) == 0 {
+			delete(rooms, callID)
+			log.Printf("Deleted empty room for call %s", callID)
+		}
+	}
+	roomsMu.Unlock()
+
+	clientsMu.Lock()
+	if c, ok := clients[client]; ok {
+		c.callID = ""
+		idleClients[client] = true
+	}
+	clientsMu.Unlock()
+
+	client.Close()
+	log.Printf("Removed client %s from call %s", client.RemoteAddr(), callID)
 }
 
 func main() {
+	// Verify static file directory exists
+	if _, err := os.Stat("./client"); os.IsNotExist(err) {
+		log.Println("Warning: ./client directory not found. Static file serving will fail.")
+	}
+
+	// Get port from environment variable or default to 8000
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8000"
+	}
+
 	fs := http.FileServer(http.Dir("./client"))
 	http.Handle("/", fs)
 	http.HandleFunc("/ws", handleConnections)
 
-	log.Println("http server started on port 8000")
-	err := http.ListenAndServe(":8000", nil)
+	log.Printf("Starting HTTP server on :%s", port)
+	err := http.ListenAndServe(":"+port, nil)
 	if err != nil {
-		log.Fatalf("server failed to start: %v", err)
+		log.Fatalf("Server failed to start: %v", err)
 	}
 }
