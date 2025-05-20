@@ -43,6 +43,7 @@ let socket = null;
 let currentCallId = null;
 let isCaller = false;
 let pendingCandidates = [];
+let hasJoined = false;
 
 // HTML elements
 const webcamButton = document.getElementById("webcamButton");
@@ -100,7 +101,6 @@ async function initializeWebSocket() {
   if (socket && socket.readyState === WebSocket.OPEN) return;
   if (socket && socket.readyState === WebSocket.CONNECTING) return;
 
-  // Use a configurable WebSocket URL (update as needed)
   const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
   socket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
 
@@ -113,12 +113,12 @@ async function initializeWebSocket() {
     try {
       msg = JSON.parse(event.data);
       if (!msg.type) throw new Error("Message missing type field");
+      console.log("Received message:", msg);
     } catch (e) {
       console.error("Invalid WebSocket message:", event.data, e);
       return;
     }
 
-    // Validate callId
     if (msg.callId && !currentCallId) {
       currentCallId = msg.callId;
       callInput.value = currentCallId;
@@ -170,8 +170,8 @@ async function initializeWebSocket() {
           pendingCandidates.push(candidate);
         }
       } else if (msg.type === "error") {
-        console.error("Signaling error:", msg.message);
-        alert(`Signaling error: ${msg.message}`);
+        console.error("Signaling error:", msg.data);
+        alert(`Signaling error: ${msg.data}`);
       } else if (msg.type === "call_joined" && !isCaller) {
         console.log("Successfully joined call. Waiting for offer.");
       } else if (msg.type === "peer_disconnected") {
@@ -272,15 +272,22 @@ answerButton.onclick = async () => {
       return;
     }
 
+    if (hasJoined) {
+      console.log("Already joined call, ignoring duplicate attempt");
+      return;
+    }
+
     await initializeWebSocket();
 
     if (socket.readyState === WebSocket.OPEN) {
+      console.log("Sending join_call for", currentCallId);
       socket.send(
         JSON.stringify({
           type: "join_call",
           callId: currentCallId,
         })
       );
+      hasJoined = true;
     } else {
       throw new Error("WebSocket not connected");
     }
@@ -334,6 +341,7 @@ function resetCallState() {
   currentCallId = null;
   isCaller = false;
   pendingCandidates = [];
+  hasJoined = false;
 
   callInput.value = "";
   callInput.readOnly = false;
