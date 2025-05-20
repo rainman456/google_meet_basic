@@ -1,11 +1,41 @@
+//  const servers = {
+//    iceServers: [
+//      {
+//        urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
+//      },
+//    ],
+//    iceCandidatePoolSize: 10,
+//  };
+
  const servers = {
-   iceServers: [
-     {
-       urls: ['stun:stun1.l.google.com:19302', 'stun:stun2.l.google.com:19302'],
-     },
-   ],
-   iceCandidatePoolSize: 10,
- };
+     iceServers: [
+      {
+        urls: "stun:stun.relay.metered.ca:80",
+      },
+      {
+        urls: "turn:global.relay.metered.ca:80",
+        username: "e6166b934e60840d935743c7",
+        credential: "uNdKAwfH/TDOs6EP",
+      },
+      {
+        urls: "turn:global.relay.metered.ca:80?transport=tcp",
+        username: "e6166b934e60840d935743c7",
+        credential: "uNdKAwfH/TDOs6EP",
+      },
+      {
+        urls: "turn:global.relay.metered.ca:443",
+        username: "e6166b934e60840d935743c7",
+        credential: "uNdKAwfH/TDOs6EP",
+      },
+      {
+        urls: "turns:global.relay.metered.ca:443?transport=tcp",
+        username: "e6166b934e60840d935743c7",
+        credential: "uNdKAwfH/TDOs6EP",
+      },
+    ],
+    iceCandidatePoolSize: 10,
+};
+
 
  let pc = null;
  let localStream = null;
