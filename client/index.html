@@ -3,54 +3,21 @@
     <meta charset="UTF-8" />
     <link rel="stylesheet" href="style.css">
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>GOOGLE MEET IMPLEMENTATION</title>
+    <title>Mini Google Meet</title>
   </head>
   <body>
-    <h2>1. Start your Webcam</h2>
-    <div class="videos">
-      <span>
-        <h3>Local Stream</h3>
-        <video id="webcamVideo" autoplay playsinline></video>
-      </span>
-      <span>
-        <h3>Remote Stream</h3>
-        <video id="remoteVideo" autoplay playsinline></video>
-      </span>
-
-
+    <div class="container">
+    <h1>Mini Google Meet</h1>
+    <video id="webcamVideo" autoplay playsinline></video>
+    <video id="remoteVideo" autoplay playsinline></video>
+    <div>
+      <button id="webcamButton">Start Webcam</button>
+      <input id="callInput" type="text" placeholder="Call ID">
+      <button id="callButton">Start Call</button>
+      <button id="answerButton">Answer Call</button>
+      <button id="hangupButton">Hang Up</button>
     </div>
-
-    <button id="webcamButton">Start webcam</button>
-    <h2>2. Create a new Call</h2>
-    <button id="callButton" disabled>Create Call (offer)</button>
-
-    <h2>3. Join a Call</h2>
-    <p>Answer the call from a different browser window or device</p>
-    
-    <input id="callInput" />
-    <button id="answerButton" disabled>Answer</button>
-
-    <h2>4. Hangup</h2>
-
-    <button id="hangupButton" disabled>Hangup</button>
-    <div id="statusText" style="margin: 10px 0; font-weight: bold;"></div>
-    <div id="connectionStatus" class="status-disconnected">Disconnected</div>
-
-     <!-- Incoming call modal -->
-<div id="incomingModal" style="
-  display: none;
-  position: fixed;
-  top: 0; left: 0; right: 0; bottom: 0;
-  background: rgba(0, 0, 0, 0.6);
-  align-items: center;
-  justify-content: center;
-  z-index: 9999;">
-  <h2>📞 Incoming Call</h2>
-  <p>Someone is calling you...</p>
-  <button id="acceptCallBtn" style="margin: 10px;">✅ Accept</button>
-  <button id="rejectCallBtn" style="margin: 10px;">❌ Reject</button>
-</div>
-
+  </div>
 
 <!-- Optional ringtone -->
 <audio id="ringtone" src="facetime_ringtone.mp3" preload="auto" loop></audio>
