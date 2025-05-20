@@ -36,284 +36,318 @@
     iceCandidatePoolSize: 10,
 };
 
+let pc = null;
+let localStream = null;
+let remoteStream = null;
+let socket = null;
+let currentCallId = null;
+let isCaller = false;
+let pendingCandidates = [];
 
- let pc = null;
- let localStream = null;
- let remoteStream = null;
- let socket = null;
- let currentCallId = null;
- let isCaller = false;
- let pendingCandidates = [];
+// HTML elements
+const webcamButton = document.getElementById("webcamButton");
+const webcamVideo = document.getElementById("webcamVideo");
+const callButton = document.getElementById("callButton");
+const callInput = document.getElementById("callInput");
+const answerButton = document.getElementById("answerButton");
+const remoteVideo = document.getElementById("remoteVideo");
+const hangupButton = document.getElementById("hangupButton");
 
-  //HTML elements
- const webcamButton = document.getElementById('webcamButton');
- const webcamVideo = document.getElementById('webcamVideo');
- const callButton = document.getElementById('callButton');
- const callInput = document.getElementById('callInput');
- const answerButton = document.getElementById('answerButton');
- const remoteVideo = document.getElementById('remoteVideo');
- const hangupButton = document.getElementById('hangupButton');
+function createPeerConnection() {
+  const peer = new RTCPeerConnection(servers);
 
- function createPeerConnection() {
-   const peer = new RTCPeerConnection(servers);
+  peer.ontrack = (event) => {
+    if (event.streams && event.streams[0]) {
+      event.streams[0].getTracks().forEach((track) => {
+        if (remoteStream) {
+          remoteStream.addTrack(track);
+        }
+      });
+    }
+  };
 
-   peer.ontrack = (event) => {
-     event.streams[0].getTracks().forEach((track) => {
-       remoteStream.addTrack(track);
-     });
-   };
+  peer.onicecandidate = (event) => {
+    if (
+      event.candidate &&
+      socket &&
+      socket.readyState === WebSocket.OPEN &&
+      currentCallId
+    ) {
+      socket.send(
+        JSON.stringify({
+          type: "ice-candidate",
+          callId: currentCallId,
+          data: JSON.stringify(event.candidate),
+        })
+      );
+    }
+  };
 
-   peer.onicecandidate = (event) => {
-     if (event.candidate && socket && socket.readyState === WebSocket.OPEN && currentCallId) {
-       socket.send(JSON.stringify({
-         type: "ice-candidate",
-         callId: currentCallId,
-         data: JSON.stringify(event.candidate),
-       }));
-     }
-   };
+  peer.oniceconnectionstatechange = () => {
+    if (
+      peer.iceConnectionState === "disconnected" ||
+      peer.iceConnectionState === "failed"
+    ) {
+      alert("Connection lost. Ending call.");
+      resetCallState();
+    }
+  };
 
-   return peer;
- }
+  return peer;
+}
 
- webcamButton.onclick = async () => {
-   try {
-     localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-     remoteStream = new MediaStream();
+async function initializeWebSocket() {
+  if (socket && socket.readyState === WebSocket.OPEN) return;
+  if (socket && socket.readyState === WebSocket.CONNECTING) return;
 
-     if (!pc || pc.signalingState === 'closed') {
-       pc = createPeerConnection();
-     }
+  // Use a configurable WebSocket URL (update as needed)
+  const wsProtocol = location.protocol === "https:" ? "wss" : "ws";
+  socket = new WebSocket(`${wsProtocol}://${location.host}/ws`);
 
-     localStream.getTracks().forEach((track) => {
-       pc.addTrack(track, localStream);
-     });
+  socket.onopen = () => {
+    console.log("Connected to signaling server");
+  };
 
-     webcamVideo.srcObject = localStream;
-     remoteVideo.srcObject = remoteStream;
+  socket.onmessage = async (event) => {
+    let msg;
+    try {
+      msg = JSON.parse(event.data);
+      if (!msg.type) throw new Error("Message missing type field");
+    } catch (e) {
+      console.error("Invalid WebSocket message:", event.data, e);
+      return;
+    }
 
-     callButton.disabled = false;
-     answerButton.disabled = false;
-     webcamButton.disabled = true;
-   } catch (e) {
-     console.error("Error accessing media devices.", e);
-     alert("Error accessing media devices: " + e.message);
-   }
-   //connectSocket(); 
+    // Validate callId
+    if (msg.callId && !currentCallId) {
+      currentCallId = msg.callId;
+      callInput.value = currentCallId;
+      console.log(`Initialized currentCallId: ${currentCallId}`);
+    } else if (msg.callId && msg.callId !== currentCallId) {
+      console.warn(
+        `Ignoring message for callId ${msg.callId}. Current: ${currentCallId}`
+      );
+      return;
+    }
 
- };
+    try {
+      if (msg.type === "offer" && !isCaller) {
+        if (!pc || pc.signalingState === "closed") {
+          pc = createPeerConnection();
+          if (localStream) {
+            localStream.getTracks().forEach((track) =>
+              pc.addTrack(track, localStream)
+            );
+          }
+        }
 
- function connectSocket() {
-   if (socket && socket.readyState === WebSocket.OPEN) {
-     if (!isCaller && currentCallId) {
-       socket.send(JSON.stringify({
-         type: "join_call",
-         callId: currentCallId,
-       }));
-     }
-     return;
-   }
+        await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
 
-   if (socket && socket.readyState === WebSocket.CONNECTING) {
-     return;
-   }
+        socket.send(
+          JSON.stringify({
+            type: "answer",
+            callId: currentCallId,
+            data: JSON.stringify(pc.localDescription),
+          })
+        );
 
-   socket = new WebSocket(`${location.protocol === 'https:' ? 'wss' : 'ws'}:${location.host}/ws`);
+        for (const candidate of pendingCandidates) {
+          await pc.addIceCandidate(candidate);
+        }
+        pendingCandidates = [];
 
-   socket.onopen = async () => {
-     console.log("Connected to signaling server");
-
-     if (!pc || pc.signalingState === 'closed') {
-       pc = createPeerConnection();
-     }
-
-     if (isCaller && currentCallId) {
-       try {
-         const offer = await pc.createOffer();
-         await pc.setLocalDescription(offer);
-
-         socket.send(JSON.stringify({
-           type: "offer",
-           callId: currentCallId,
-           data: JSON.stringify(pc.localDescription),
-         }));
-       } catch (e) {
-         console.error("Error creating or sending offer:", e);
-       }
-     } else if (!isCaller && currentCallId) {
-       socket.send(JSON.stringify({
-         type: "join_call",
-         callId: currentCallId,
-       }));
-     }
-   };
-
-   socket.onmessage = async (event) => {
-     let msg;
-     try {
-       msg = JSON.parse(event.data);
-     } catch (e) {
-       console.error("Received non-JSON message:", event.data);
-       return;
-     }
-
-     if (msg.callId && !currentCallId) {
- currentCallId = msg.callId;
- callInput.value = currentCallId;
- console.log(`Initialized currentCallId from incoming message: ${currentCallId}`);
- } else if (msg.callId && msg.callId !== currentCallId) {
- console.warn(`Received message for different callId: ${msg.callId}. Current: ${currentCallId}. Ignoring.`);
- return;
- }
-
-
-       try {
-    if (msg.type === "offer" && !isCaller) {
-      if (!pc || pc.signalingState === 'closed') {
-        pc = createPeerConnection();
+        hangupButton.disabled = false;
+      } else if (msg.type === "answer" && isCaller) {
+        await pc.setRemoteDescription(new RTCSessionDescription(JSON.parse(msg.data)));
+        hangupButton.disabled = false;
+      } else if (msg.type === "ice-candidate") {
+        const candidate = new RTCIceCandidate(JSON.parse(msg.data));
+        if (pc.remoteDescription && pc.remoteDescription.type) {
+          await pc.addIceCandidate(candidate);
+        } else {
+          pendingCandidates.push(candidate);
+        }
+      } else if (msg.type === "error") {
+        console.error("Signaling error:", msg.message);
+        alert(`Signaling error: ${msg.message}`);
+      } else if (msg.type === "call_joined" && !isCaller) {
+        console.log("Successfully joined call. Waiting for offer.");
+      } else if (msg.type === "peer_disconnected") {
+        alert("The other user has disconnected.");
+        resetCallState();
       }
+    } catch (err) {
+      console.error("Error processing WebSocket message:", err, msg);
+    }
+  };
 
-      if (!currentCallId && msg.callId) {
-        currentCallId = msg.callId;
-        callInput.value = currentCallId;
-      }
+  socket.onclose = () => {
+    console.log("Disconnected from signaling server");
+    resetCallState();
+  };
 
-      const remoteOffer = JSON.parse(msg.data);
-      await pc.setRemoteDescription(new RTCSessionDescription(remoteOffer));
+  socket.onerror = (error) => {
+    console.error("WebSocket Error:", error);
+    alert("Failed to connect to signaling server. Please try again.");
+    resetCallState();
+  };
+}
 
-         const answer = await pc.createAnswer();
-         await pc.setLocalDescription(answer);
+webcamButton.onclick = async () => {
+  try {
+    localStream = await navigator.mediaDevices.getUserMedia({
+      video: true,
+      audio: true,
+    });
+    remoteStream = new MediaStream();
 
-         socket.send(JSON.stringify({
-           type: "answer",
-           callId: currentCallId,
-           data: JSON.stringify(pc.localDescription),
-         }));
+    if (!pc || pc.signalingState === "closed") {
+      pc = createPeerConnection();
+    }
 
-         for (const c of pendingCandidates) {
-           await pc.addIceCandidate(c);
-         }
-         pendingCandidates = [];
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
 
-         hangupButton.disabled = false;
+    webcamVideo.srcObject = localStream;
+    remoteVideo.srcObject = remoteStream;
 
-       } else if (msg.type === "answer" && isCaller) {
-         const answer = JSON.parse(msg.data);
-         await pc.setRemoteDescription(new RTCSessionDescription(answer));
-         hangupButton.disabled = false;
+    callButton.disabled = false;
+    answerButton.disabled = false;
+    webcamButton.disabled = true;
 
-       } else if (msg.type === "ice-candidate") {
-         const candidate = new RTCIceCandidate(JSON.parse(msg.data));
-         if (pc.remoteDescription && pc.remoteDescription.type) {
-           await pc.addIceCandidate(candidate);
-         } else {
-           pendingCandidates.push(candidate);
-         }
+    await initializeWebSocket();
+  } catch (e) {
+    console.error("Error accessing media devices:", e);
+    alert(`Error accessing media devices: ${e.message}`);
+    callButton.disabled = true;
+    answerButton.disabled = true;
+    webcamButton.disabled = false;
+  }
+};
 
-       } else if (msg.type === "error") {
-         console.error("Signaling error:", msg.message);
-         alert("Signaling error: " + msg.message);
-       } else if (msg.type === "call_joined" && !isCaller) {
-         console.log("Successfully joined call. Waiting for offer.");
-       } else if (msg.type === "peer_disconnected") {
-         alert("The other user has disconnected.");
-         resetCallState();
-       }
+callButton.onclick = async () => {
+  try {
+    if (!localStream) await webcamButton.onclick();
 
-     } catch (err) {
-       console.error("Error processing message or WebRTC operation:", err, "Original message:", msg);
-     }
-   };
+    isCaller = true;
+    currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
+    callInput.value = currentCallId;
+    callInput.readOnly = true;
 
-   socket.onclose = () => {
-     console.log("Disconnected from signaling server");
-   };
+    await initializeWebSocket();
 
-   socket.onerror = (error) => {
-     console.error("WebSocket Error:", error);
-     alert("Could not connect to the signaling server. Please ensure it's running and accessible.");
-   };
- }
+    if (socket.readyState === WebSocket.OPEN) {
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
 
- callButton.onclick = async () => {
-  if (!localStream) await webcamButton.onclick();
-
-  isCaller = true;
-  currentCallId = "call_" + Math.random().toString(36).substr(2, 9);
-  callInput.value = currentCallId;
-  callInput.readOnly = true;
-
-  connectSocket();
+      socket.send(
+        JSON.stringify({
+          type: "offer",
+          callId: currentCallId,
+          data: JSON.stringify(pc.localDescription),
+        })
+      );
+    } else {
+      throw new Error("WebSocket not connected");
+    }
+  } catch (e) {
+    console.error("Error initiating call:", e);
+    alert("Failed to start call. Please try again.");
+    resetCallState();
+  }
 };
 
 answerButton.onclick = async () => {
-  if (!localStream) await webcamButton.onclick();
+  try {
+    if (!localStream) await webcamButton.onclick();
 
-  isCaller = false;
-  currentCallId = callInput.value.trim();
-  callInput.readOnly = true;
+    isCaller = false;
+    currentCallId = callInput.value.trim();
+    callInput.readOnly = true;
 
-  if (!currentCallId) {
-    alert("Please enter a Call ID to answer.");
-    callInput.readOnly = false;
-    return;
+    if (!currentCallId) {
+      alert("Please enter a Call ID to answer.");
+      callInput.readOnly = false;
+      return;
+    }
+
+    await initializeWebSocket();
+
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.send(
+        JSON.stringify({
+          type: "join_call",
+          callId: currentCallId,
+        })
+      );
+    } else {
+      throw new Error("WebSocket not connected");
+    }
+  } catch (e) {
+    console.error("Error answering call:", e);
+    alert("Failed to answer call. Please try again.");
+    resetCallState();
   }
-
-  connectSocket();
 };
 
- hangupButton.onclick = async () => {
-   if (socket && socket.readyState === WebSocket.OPEN && currentCallId) {
-     socket.send(JSON.stringify({
-       type: "hangup",
-       callId: currentCallId,
-     }));
-   }
-   resetCallState();
- };
+hangupButton.onclick = () => {
+  if (socket && socket.readyState === WebSocket.OPEN && currentCallId) {
+    socket.send(
+      JSON.stringify({
+        type: "hangup",
+        callId: currentCallId,
+      })
+    );
+  }
+  resetCallState();
+};
 
- function resetCallState() {
-   if (pc) {
-     pc.ontrack = null;
-     pc.onicecandidate = null;
+function resetCallState() {
+  if (pc) {
+    pc.ontrack = null;
+    pc.onicecandidate = null;
+    pc.oniceconnectionstatechange = null;
+    pc.close();
+    pc = null;
+  }
 
-     if (localStream) {
-       localStream.getTracks().forEach(track => track.stop());
-       localStream = null;
-     }
+  if (localStream) {
+    localStream.getTracks().forEach((track) => {
+      if (track.readyState === "live") track.stop();
+    });
+    localStream = null;
+  }
 
-     if (remoteStream) {
-       remoteStream.getTracks().forEach(track => track.stop());
-       remoteStream = null;
-     }
+  if (remoteStream) {
+    remoteStream.getTracks().forEach((track) => {
+      if (track.readyState === "live") track.stop();
+    });
+    remoteStream = null;
+  }
 
-     webcamVideo.srcObject = null;
-     remoteVideo.srcObject = null;
+  if (socket && socket.readyState !== WebSocket.CLOSED) {
+    socket.close();
+  }
+  socket = null;
 
-     pc.close();
-     pc = null;
-   }
+  currentCallId = null;
+  isCaller = false;
+  pendingCandidates = [];
 
-   if (socket) {
-     socket.close();
-     socket = null;
-   }
+  callInput.value = "";
+  callInput.readOnly = false;
 
-   currentCallId = null;
-   isCaller = false;
-   pendingCandidates = [];
+  webcamVideo.srcObject = null;
+  remoteVideo.srcObject = null;
 
-   callInput.value = "";
-   callInput.readOnly = false;
+  callButton.disabled = true;
+  answerButton.disabled = true;
+  hangupButton.disabled = true;
+  webcamButton.disabled = false;
+}
 
-   callButton.disabled = true;
-   answerButton.disabled = true;
-   hangupButton.disabled = true;
-   webcamButton.disabled = false;
- }
-
-  //Initial state
- callButton.disabled = true;
- answerButton.disabled = true;
- hangupButton.disabled = true;
-
+// Initial state
+callButton.disabled = true;
+answerButton.disabled = true;
+hangupButton.disabled = true;
