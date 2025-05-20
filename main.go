@@ -143,6 +143,7 @@ func handleOffer(sender *websocket.Conn, msg Message) {
 
 	// Limit room to 2 clients
 	if len(room.clients) >= 2 {
+		log.Printf("Room %s is full, rejecting offer from %s", msg.CallID, sender.RemoteAddr())
 		sendError(sender, msg.CallID, "Room is full")
 		return
 	}
@@ -173,6 +174,7 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
 	if !exists {
+		log.Printf("No room found for call %s from %s", msg.CallID, sender.RemoteAddr())
 		sendError(sender, msg.CallID, "Room not found")
 		roomsMu.Unlock()
 		return
@@ -180,6 +182,7 @@ func handleAnswer(sender *websocket.Conn, msg Message) {
 
 	// Limit room to 2 clients
 	if len(room.clients) >= 2 && !room.clients[sender] {
+		log.Printf("Room %s is full, rejecting answer from %s", msg.CallID, sender.RemoteAddr())
 		sendError(sender, msg.CallID, "Room is full")
 		roomsMu.Unlock()
 		return
@@ -209,6 +212,7 @@ func handleICECandidate(sender *websocket.Conn, msg Message) {
 	roomsMu.Lock()
 	room, exists := rooms[msg.CallID]
 	if !exists {
+		log.Printf("No room found for call %s from %s", msg.CallID, sender.RemoteAddr())
 		sendError(sender, msg.CallID, "Room not found")
 		roomsMu.Unlock()
 		return
@@ -235,13 +239,22 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 			clients: make(map[*websocket.Conn]bool),
 			offer:   nil,
 		}
-		log.Printf("Created room for call %s", msg.CallID)
+		log.Printf("Created room for call %s by %s", msg.CallID, sender.RemoteAddr())
 	}
 
 	room := rooms[msg.CallID]
 
+	// Prevent duplicate joins
+	if room.clients[sender] {
+		log.Printf("Client %s already in room %s, ignoring join", sender.RemoteAddr(), msg.CallID)
+		roomsMu.Unlock()
+		return
+	}
+
 	// Limit room to 2 clients
+	log.Printf("Room %s current clients: %v", msg.CallID, room.clients)
 	if len(room.clients) >= 2 {
+		log.Printf("Room %s is full, rejecting join from %s", msg.CallID, sender.RemoteAddr())
 		sendError(sender, msg.CallID, "Room is full")
 		roomsMu.Unlock()
 		return
@@ -253,11 +266,11 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 	delete(idleClients, sender)
 	clientsMu.Unlock()
 
-	log.Printf("Client %s joined call %s", sender.RemoteAddr(), msg.CallID)
+	log.Printf("Client %s joined call %s (room size: %d)", sender.RemoteAddr(), msg.CallID, len(room.clients))
 
 	if room.offer != nil {
 		if err := sender.WriteJSON(*room.offer); err != nil {
-			log.Printf("Error sending stored offer to %s: %v", sender.RemoteAddr(), err)
+			log.Printf("Error sending stored offer to %s for call %s: %v", sender.RemoteAddr(), msg.CallID, err)
 			removeClient(sender, msg.CallID)
 		} else {
 			log.Printf("Sent stored offer to %s for call %s", sender.RemoteAddr(), msg.CallID)
@@ -267,8 +280,10 @@ func handleJoinCall(sender *websocket.Conn, msg Message) {
 			Type:   "call_joined",
 			CallID: msg.CallID,
 		}); err != nil {
-			log.Printf("Error sending call_joined to %s: %v", sender.RemoteAddr(), err)
+			log.Printf("Error sending call_joined to %s for call %s: %v", sender.RemoteAddr(), msg.CallID, err)
 			removeClient(sender, msg.CallID)
+		} else {
+			log.Printf("Sent call_joined to %s for call %s", sender.RemoteAddr(), msg.CallID)
 		}
 	}
 	roomsMu.Unlock()
@@ -278,6 +293,7 @@ func handleHangup(sender *websocket.Conn, callID string) {
 	roomsMu.Lock()
 	room, exists := rooms[callID]
 	if !exists {
+		log.Printf("No room found for call %s during hangup by %s", callID, sender.RemoteAddr())
 		roomsMu.Unlock()
 		return
 	}
