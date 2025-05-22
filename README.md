@@ -1,7 +1,7 @@
 # videochat
 
 ## Description
- This is a very basic implementation of a google meet ,adapted from my other repo, using goriila websockets and Webrtc it makes uses of rooms and client ids to automatically connects two peers who want to communicate by room id here is the link, (https://google-meet-testing.onrender.com/)
+ This is a very basic implementation of a google meet to understand how it works it's adapted from my other repo`https://github.com/rainman456/videochat` , which uses gorrilla websockets and the Webrtc api and  makes uses of rooms and client ids to automatically connects two peers who want to communicate by inserting room id think of the id  as the meet link, here is the live preview: (https://google-meet-testing.onrender.com/) it's very basic and still needs to be worked on anyways do enjoy it. I look forward to advancing this project sooner or later.
 
 ## Usage
  You could run this locally or on online using a host of your choice I chose render for this ,to run locally 
